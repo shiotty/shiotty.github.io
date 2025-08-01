@@ -1,0 +1,432 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <title>Google Maps Distance</title>
+    <meta charset="utf-8">
+    <style>
+      #title {
+        font-size: 20px;
+        margin: 0 auto;
+        padding: 10px;
+        background-color: #f8f9fa;
+        border-bottom: 1px solid #dee2e6;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 1000;
+        height: auto;
+      }
+      #map {
+        position: absolute;
+        top: 100px;
+        right: 8px;
+        bottom: 5px;
+        left: 8px;
+        width: auto;
+        height: auto;
+      }
+      .control-panel {
+        margin-top: 10px;
+        margin-bottom: 5px;
+      }
+      .mode-selector {
+        margin-right: 15px;
+        display: inline-block;
+      }
+      .button-group {
+        margin-left: 15px;
+        display: inline-block;
+      }
+      button {
+        padding: 5px 10px;
+        margin: 0 5px;
+        border: 1px solid #dee2e6;
+        border-radius: 4px;
+        background-color: #fff;
+        cursor: pointer;
+      }
+      button:hover {
+        background-color: #e9ecef;
+      }
+      .result {
+        margin: 0 10px;
+        font-weight: bold;
+        display: inline-block;
+      }
+    </style>
+  </head>
+
+    <body>
+      <div id="title">
+        ＜クリック点連結ルートと距離を求める＞
+        <div class="control-panel">
+          <span class="mode-selector">
+            <label><input type="radio" name="mode" value="driving" onchange="calcResult()" checked>自動車</label>
+            <label><input type="radio" name="mode" value="walking" onchange="calcResult()">徒歩</label>
+            <label><input type="radio" name="mode" value="cycling" onchange="calcResult()">自転車</label>
+          </span>
+          <span class="result">【距離】<span id="distance"></span></span>
+          <span class="result">【時間】<span id="duration"></span></span>
+          <span class="button-group">
+            <button id="undo" title="最後に追加したポイントを削除">1つ戻る</button>
+            <button id="clear" title="すべてのポイントをクリア">クリア</button>
+          </span>
+        </div>
+      </div>
+      <div id="map"></div>
+
+      <script>
+        (g=>{var h,a,k,p="The Google Maps JavaScript API",c="google",l="importLibrary",q="__ib__",m=document,b=window;b=b[c]||(b[c]={});var d=b.maps||(b.maps={}),r=new Set,e=new URLSearchParams,u=()=>h||(h=new Promise(async(f,n)=>{await (a=m.createElement("script"));e.set("libraries",[...r]+"");for(k in g)e.set(k.replace(/[A-Z]/g,t=>"_"+t[0].toLowerCase()),g[k]);e.set("callback",c+".maps."+q);a.src=`https://maps.${c}apis.com/maps/api/js?`+e;d[q]=f;a.onerror=()=>h=n(Error(p+" could not load."));a.nonce=m.querySelector("script[nonce]")?.nonce||"";m.head.append(a)}));d[l]?console.warn(p+" only loads once. Ignoring:",g):d[l]=(f,...n)=>r.add(f)&&u().then(()=>d[l](f,...n))})
+        ({key: "AIzaSyDAHsSprXYxrZ8GboSsZi6BaLLcq_pg_hA", v: "weekly"});
+      </script>
+
+      <script>
+        // グローバル変数の定義
+        let map;                      // Google Mapのインスタンス
+        let markerPts = [];          // マーカーを格納する配列
+        let elevationService = null;  // 標高サービス
+        let directionsService = null; // ルート検索サービス
+        let directionsRenderer = null;// ルート描画サービス
+        let polyline = null;         // ルートの線オブジェクト
+        let elevations = null;       // 標高データ
+        const SAMPLES = 256;         // 標高計算のサンプル数
+        const MAX_MARKERS = 30;      // マーカーの最大数
+
+        async function initMap() {
+          try {
+            const { Map } = await google.maps.importLibrary("maps");
+
+            map = new Map(document.getElementById("map"), {
+              zoom: 10,
+              center: {lat: 35.681167, lng: 139.767052},
+              mapId: "calc_route_distance_MAP",
+              mapTypeControl: true,     // 地図タイプ切替コントロールの表示
+              fullscreenControl: true,  // フルスクリーンコントロールの表示
+              streetViewControl: true   // ストリートビューコントロールの表示
+            });
+
+            // サービス設定
+            elevationService = new google.maps.ElevationService();
+            directionsService = new google.maps.DirectionsService();
+            directionsRenderer = new google.maps.DirectionsRenderer({
+              map: map,
+              suppressMarkers: true,    // デフォルトマーカーを非表示
+              preserveViewport: true    // ルート表示時にビューポートを変更しない
+            });
+
+            // マップクリックイベントの設定
+            map.addListener('click', (e) => {
+              addMarker(e.latLng);
+            });
+
+            // ボタンイベントの設定
+            document.getElementById('undo').addEventListener('click', undo);
+            document.getElementById('clear').addEventListener('click', reset);
+
+          } catch (error) {
+            console.error('Map initialization failed:', error);
+            alert('マップの初期化に失敗しました。ページを再読み込みしてください。');
+          }
+        }
+
+        async function addMarker(latlng) {
+          try {
+            // マーカー数の上限チェック
+            if (markerPts.length >= MAX_MARKERS) {
+              alert(`マーカーは最大${MAX_MARKERS}個までです`);
+              return;
+            }
+
+            // マーカーライブラリの読み込み
+            const { AdvancedMarkerElement, PinElement } = await google.maps.importLibrary("marker");
+
+            // マーカーの見た目の設定
+            const pinNumber = markerPts.length + 1;
+            const pinElement = new PinElement({
+              glyph: pinNumber.toString(),    // マーカー内の数字
+              glyphColor: "white",            // 数字の色
+              background: "#1a73e8",          // マーカーの背景色
+              borderColor: "#1a73e8"          // マーカーの枠線色
+            });
+
+            // マーカーの作成と配置
+            const markerPt = new AdvancedMarkerElement({ 
+              map: map, 
+              position: latlng, 
+              content: pinElement.element, 
+              title: `ポイント ${pinNumber}`,
+            });
+
+            markerPts.push(markerPt);
+            calcResult();  // ルートの再計算
+
+          } catch (error) {
+            console.error('Marker addition failed:', error);
+            alert('マーカーの追加に失敗しました');
+          }
+        }
+
+        function calcResult() {
+          if (markerPts.length < 2) return;  // マーカーが2個未満の場合は処理しない
+
+          try {
+            // 選択された移動手段の取得（自動車/徒歩/自転車）
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            
+            // ルート検索のリクエストを作成
+            const request = {
+              origin: markerPts[0].position,      // 開始地点
+              destination: markerPts[markerPts.length - 1].position,  // 終了地点
+              waypoints: markerPts.slice(1, -1).map(marker => ({     // 経由地点
+                location: marker.position,
+                stopover: true
+              })),
+              travelMode: google.maps.TravelMode[mode.toUpperCase()]  // 移動手段
+            };
+
+            // ルート検索の実行
+            directionsService.route(request, (response, status) => {
+              if (status === google.maps.DirectionsStatus.OK) {
+                // ルートの描画
+                directionsRenderer.setDirections(response);
+
+                const route = response.routes[0];
+                // 総距離と所要時間の計算
+                const dist = route.legs.reduce((sum, leg) => sum + leg.distance.value, 0) / 1000;
+                const duration = route.legs.reduce((sum, leg) => sum + leg.duration.value, 0) / 60;
+
+                // 結果の表示
+                document.getElementById('distance').innerHTML = dist.toFixed(1) + " km";
+                document.getElementById('duration').innerHTML = duration.toFixed(1) + " 分";
+
+                // 標高データの取得
+                const path = route.overview_path;
+                elevationService.getElevationAlongPath(
+                  { path, samples: SAMPLES },
+                  plotElevation
+                );
+
+              } else {
+                handleDirectionsError(status);
+              }
+            });
+
+          } catch (error) {
+            console.error('Route calculation failed:', error);
+            alert('ルートの計算に失敗しました');
+          }
+        }
+
+        /**
+         * ルート検索のエラーハンドリング
+         * @param {string} status - エラーステータス
+         */
+        function handleDirectionsError(status) {
+          const errorMessages = {
+            [google.maps.DirectionsStatus.ZERO_RESULTS]: 'ルートが見つかりませんでした',
+            [google.maps.DirectionsStatus.MAX_WAYPOINTS_EXCEEDED]: '経由地点が多すぎます',
+            [google.maps.DirectionsStatus.INVALID_REQUEST]: '無効なリクエストです',
+            [google.maps.DirectionsStatus.OVER_QUERY_LIMIT]: 'クエリ制限を超えました',
+            [google.maps.DirectionsStatus.REQUEST_DENIED]: 'リクエストが拒否されました',
+            [google.maps.DirectionsStatus.UNKNOWN_ERROR]: '不明なエラーが発生しました'
+          };
+          alert(errorMessages[status] || 'ルートの取得に失敗しました');
+        }
+
+        /**
+         * 標高データを使用してルートを描画する
+         * @param {Array} results - 標高データの配列
+         * @param {string} status - 処理状態
+         */
+        function plotElevation(results, status) {
+          if (status !== google.maps.ElevationStatus.OK) {
+            console.error('Elevation service failed:', status);
+            return;
+          }
+
+          elevations = results;
+          const path = results.map(elevation => elevation.location);
+
+          // 既存のルート線を削除
+          if (polyline) {
+            polyline.setMap(null);
+          }
+
+          // 新しいルート線を描画
+          polyline = new google.maps.Polyline({
+            path: path,
+            map: map,
+            strokeColor: "#1a73e8",    // 線の色
+            strokeOpacity: 0.7,        // 線の透明度
+            strokeWeight: 3            // 線の太さ
+          });
+        }
+
+        /**
+         * 最後に追加したマーカーとルートを削除する
+         */
+        function undo() {
+          if (markerPts.length === 0) return;
+
+          // 最後のマーカーを削除
+          const lastMarker = markerPts.pop();
+          if (lastMarker) {
+            lastMarker.map = null;
+          }
+
+          // ルートの再描画
+          if (directionsRenderer) {
+            directionsRenderer.setMap(null);
+            directionsRenderer.setMap(map);
+          }
+
+          // マーカーが2個以上あればルートを再計算
+          if (markerPts.length > 1) {
+            calcResult();
+          } else {
+            clearRouteDisplay();
+          }
+        }
+
+        /**
+         * ルート表示をクリアする
+         */
+        function clearRouteDisplay() {
+          if (polyline) {
+            polyline.setMap(null);
+          }
+          if (directionsRenderer) {
+            directionsRenderer.setDirections({ routes: [] });
+          }
+          document.getElementById('distance').innerHTML = "";
+          document.getElementById('duration').innerHTML = "";
+        }
+
+        /**
+         * すべてのマーカーとルートを削除する
+         */
+        function reset() {
+          markerPts.forEach(marker => {
+            if (marker) marker.map = null;
+          });
+          markerPts = [];
+          clearRouteDisplay();
+        }
+
+        // アプリケーションの初期化
+        initMap().catch(error => {
+          console.error('Application initialization failed:', error);
+          alert('アプリケーションの初期化に失敗しました');
+        });
+
+        // マーカーアイコンの設定を取得する関数
+        function getMarkerIconSrc(data) {
+          const pinConfig = {
+            glyphColor: "white"
+          };
+
+          if (maptag === 'j4') {
+            if (data.done === 'Y') {
+              switch (data.tag2) {
+                case '日本100名瀑':
+                  pinConfig.background = pinConfig.borderColor = '#0000FF';  // 青
+                  break;
+                case '日本100低山':
+                  pinConfig.background = pinConfig.borderColor = '#800080';  // 紫
+                  break;
+                default:
+                  pinConfig.background = pinConfig.borderColor = '#FF0000';  // 赤
+              }
+            } else {
+              switch (data.tag2) {
+                case '日本100名瀑':
+                  pinConfig.background = pinConfig.borderColor = '#00FFFF';  // 水色
+                  break;
+                case '日本100低山':
+                  pinConfig.background = pinConfig.borderColor = '#90EE90';  // 黄緑
+                  break;
+                default:
+                  pinConfig.background = pinConfig.borderColor = '#008000';  // 緑
+              }
+            }
+          } else if (maptag === 'Japan') {
+            if (data.done === 'Y') {
+              pinConfig.background = pinConfig.borderColor = '#FF0000';  // 赤
+            } else {
+              switch (data.tag0) {
+                case 'j1':
+                  pinConfig.background = pinConfig.borderColor = '#FFA500';  // オレンジ
+                  break;
+                case 'j2':
+                  pinConfig.background = pinConfig.borderColor = '#FFFF00';  // 黄色
+                  break;
+                case 'j3':
+                  pinConfig.background = pinConfig.borderColor = '#00FFFF';  // 水色
+                  break;
+                case 'j4':
+                  if (['日本100名山', '日本200名山', '日本300名山', '日本100低山', 'Other山'].includes(data.tag2)) {
+                    pinConfig.background = pinConfig.borderColor = '#008000';  // 緑
+                  } else if (['日本100名瀑', '準100名瀑', 'Other滝'].includes(data.tag2)) {
+                    pinConfig.background = pinConfig.borderColor = '#0000FF';  // 青
+                  }
+                  break;
+                case 'j5':
+                  pinConfig.background = pinConfig.borderColor = '#90EE90';  // 黄緑
+                  break;
+                case 'j6':
+                  pinConfig.background = pinConfig.borderColor = '#800080';  // 紫
+                  break;
+              }
+            }
+          } else {
+            if (data.done === 'Y') {
+              pinConfig.background = pinConfig.borderColor = 'red';
+            } else {
+              pinConfig.background = pinConfig.borderColor = 'blue';
+            }
+          }
+
+          return pinConfig;
+        }
+
+        async function createMarker(data, index) {
+          // マーカーライブラリの読み込み
+          const { AdvancedMarkerElement, PinElement } = await google.maps.importLibrary("marker");
+
+          // マーカー位置セット
+          const markerPosition = new google.maps.LatLng({
+            lat: Number(data.lat),
+            lng: Number(data.lng)
+          });
+          
+          // マーカーの設定を取得
+          const pinConfig = getMarkerIconSrc(data);
+          
+          // マーカーの見た目を設定
+          const pinElement = new PinElement(pinConfig);
+
+          // マーカー生成
+          const marker = new AdvancedMarkerElement({
+            map: map,
+            position: markerPosition,
+            content: pinElement.element,
+            title: data.name,
+            gmpClickable: true,
+          });
+
+          // マーカーをオブジェクトに保存
+          markerMap[index] = { marker, data };
+
+          // マーカークリック時の吹き出し
+          marker.addListener("gmp-click", () => {
+            openInfoWindow(marker, data);
+          });
+
+          return marker;
+        }
+      </script>
+
+    </body>
+  </html>
